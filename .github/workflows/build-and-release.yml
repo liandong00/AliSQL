@@ -119,7 +119,7 @@ jobs:
           cat "$VERSION_FILE"
 
           # ---- Build & install ----
-          source scl_source enable devtoolset-10
+          source scl_source enable devtoolset-10 || true
           sh build.sh -t release -d /opt/alisql
           make install
 
