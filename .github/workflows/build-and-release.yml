@@ -58,7 +58,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Build inside oraclelinux:7 (glibc 2.17 + static OpenSSL 1.0.2u)
+      - name: Build inside oraclelinux:7 (glibc 2.17 + static OpenSSL 1.1.1w)
         env:
           MAJOR:      ${{ needs.parse.outputs.major }}
           MINOR:      ${{ needs.parse.outputs.minor }}
@@ -102,21 +102,22 @@ jobs:
           source scl_source enable devtoolset-10 || true
           gcc --version
 
-          # ---- Static OpenSSL 1.0.2u ----
-          # Build a statically-linked OpenSSL so the resulting mysqld carries no
-          # external libssl.so.10 / libcrypto.so.10 dependency and can run on any
-          # glibc>=2.17 base (e.g. the debian:11-slim runtime image).
+          # ---- Static OpenSSL 1.1.1w ----
+          # AliSQL 5.7.44 (MySQL 5.7.35+) requires OpenSSL >= 1.1.1, so 1.0.x is rejected.
+          # Build a statically-linked OpenSSL 1.1.1w so the resulting mysqld carries no
+          # external libssl / libcrypto dependency and can run on any glibc>=2.17 base
+          # (e.g. the debian:11-slim runtime image).
           cd /opt
           wget -q -O openssl-src.tar.gz \
-            "https://github.com/openssl/openssl/archive/refs/tags/OpenSSL_1_0_2u.tar.gz"
+            "https://github.com/openssl/openssl/archive/refs/tags/OpenSSL_1_1_1w.tar.gz"
           tar -xzf openssl-src.tar.gz
-          cd openssl-OpenSSL_1_0_2u
-          ./config --prefix=/opt/openssl-static no-shared no-zlib -fPIC
-          # OpenSSL 1.0.2 build is not reliably parallel-safe; build serially.
-          make
+          cd openssl-OpenSSL_1_1_1w
+          ./config --prefix=/opt/openssl-static no-shared no-tests -fPIC
+          make -j"$(nproc)"
           make install_sw
-          test -f /opt/openssl-static/lib/libssl.a
-          test -f /opt/openssl-static/lib/libcrypto.a
+          find /opt/openssl-static -name 'libssl.a' -o -name 'libcrypto.a'
+          test -n "$(find /opt/openssl-static -name 'libssl.a' -print -quit)"
+          test -n "$(find /opt/openssl-static -name 'libcrypto.a' -print -quit)"
 
           # ---- Inject version from tag ----
           # 8.0 branch uses MYSQL_VERSION; 5.7 branch uses VERSION; same internal format.
@@ -202,5 +203,5 @@ jobs:
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
-            --notes "Auto-built AliSQL ${VERSION} (oraclelinux:7, glibc 2.17, static OpenSSL 1.0.2u — no external libssl dependency). x86_64 and aarch64 binaries attached." \
+            --notes "Auto-built AliSQL ${VERSION} (oraclelinux:7, glibc 2.17, static OpenSSL 1.1.1w — no external libssl dependency). x86_64 and aarch64 binaries attached." \
             artifacts/*.tar.xz
