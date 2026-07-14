@@ -47,10 +47,8 @@ jobs:
         include:
           - arch: x86_64
             runner: ubuntu-24.04
-            cmake_arch: x86_64
           - arch: aarch64
             runner: ubuntu-24.04-arm
-            cmake_arch: aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
@@ -58,106 +56,42 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Build inside oraclelinux:7 (glibc 2.17 + static OpenSSL 1.1.1w)
+      # 复刻方案三的已验证配方：debian:11 + 系统 OpenSSL 1.1.1，bash build.sh，
+      # 不注入版本号（VERSION 保持仓库原样 -> 干净 5.7.44），不做静态 SSL。
+      # 产物动态链接 libssl.so.1.1，与 B 层 debian:11-slim 运行时天然匹配。
+      - name: Build inside debian:11 (方案三 recipe, glibc2.31 + system OpenSSL 1.1.1)
         env:
-          MAJOR:      ${{ needs.parse.outputs.major }}
-          MINOR:      ${{ needs.parse.outputs.minor }}
-          PATCH:      ${{ needs.parse.outputs.patch }}
-          EXTRA:      ${{ needs.parse.outputs.extra }}
-          CMAKE_ARCH: ${{ matrix.cmake_arch }}
+          VER: ${{ needs.parse.outputs.version }}
         run: |
           set -eux
           mkdir -p "${GITHUB_WORKSPACE}/out"
           docker run --rm -i \
             -v "${GITHUB_WORKSPACE}:/AliSQL" \
             -v "${GITHUB_WORKSPACE}/out:/out" \
-            -e MAJOR -e MINOR -e PATCH -e EXTRA -e CMAKE_ARCH \
-            oraclelinux:7 \
+            -e VER \
+            -e DEBIAN_FRONTEND=noninteractive \
+            debian:11-slim \
             bash -ex <<'INNER'
 
-          # ---- Toolchain repo (devtoolset-10) ----
-          cat >/etc/yum.repos.d/ol7-scl.repo <<'REPO'
-          [ol7_software_collections]
-          name=Oracle Linux 7 Software Collections ($basearch)
-          baseurl=https://yum.oracle.com/repo/OracleLinux/OL7/SoftwareCollections/$basearch/
-          gpgcheck=1
-          enabled=1
-          gpgkey=https://yum.oracle.com/RPM-GPG-KEY-oracle-ol7
-          REPO
-
-          yum clean all
-          yum makecache
-          yum install -y git wget perl \
-            devtoolset-10-gcc devtoolset-10-gcc-c++ devtoolset-10-binutils \
-            ncurses-devel libaio-devel perl-IPC-Cmd bison
-
-          # ---- CMake ----
-          cd /opt
-          wget -q "https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6-linux-${CMAKE_ARCH}.tar.gz"
-          tar -xzf "cmake-3.28.6-linux-${CMAKE_ARCH}.tar.gz"
-          export PATH="/opt/cmake-3.28.6-linux-${CMAKE_ARCH}/bin:$PATH"
+          # ---- Toolchain（与方案三 alisql57-image builder 一致）----
+          apt-get -o Acquire::Retries=5 update
+          apt-get -o Acquire::Retries=5 install -y --fix-missing --no-install-recommends \
+            bison ca-certificates cmake curl g++ gcc git \
+            libaio-dev libncurses-dev libnuma-dev libssl-dev \
+            make perl pkg-config python3 xz-utils
           cmake --version
 
-          # ---- Toolchain (gcc-10) ----
-          source scl_source enable devtoolset-10 || true
-          gcc --version
-
-          # ---- Static OpenSSL 1.1.1w ----
-          # AliSQL 5.7.44 (MySQL 5.7.35+) requires OpenSSL >= 1.1.1, so 1.0.x is rejected.
-          # Build a statically-linked OpenSSL 1.1.1w so the resulting mysqld carries no
-          # external libssl / libcrypto dependency and can run on any glibc>=2.17 base
-          # (e.g. the debian:11-slim runtime image).
-          cd /opt
-          wget -q -O openssl-src.tar.gz \
-            "https://github.com/openssl/openssl/archive/refs/tags/OpenSSL_1_1_1w.tar.gz"
-          tar -xzf openssl-src.tar.gz
-          cd openssl-OpenSSL_1_1_1w
-          ./config --prefix=/opt/openssl-static no-shared no-tests -fPIC
-          make -j"$(nproc)"
-          make install_sw
-          find /opt/openssl-static -name 'libssl.a' -o -name 'libcrypto.a'
-          test -n "$(find /opt/openssl-static -name 'libssl.a' -print -quit)"
-          test -n "$(find /opt/openssl-static -name 'libcrypto.a' -print -quit)"
-
-          # ---- Inject version from tag ----
-          # 8.0 branch uses MYSQL_VERSION; 5.7 branch uses VERSION; same internal format.
+          # ---- Build & install（不改 VERSION，不传 WITH_SSL）----
+          # 用 bash 跑：build.sh 用了 set -o pipefail。
           cd /AliSQL
-          VERSION_FILE=""
-          for f in MYSQL_VERSION VERSION; do
-            [ -f "$f" ] && VERSION_FILE="$f" && break
-          done
-          if [ -z "$VERSION_FILE" ]; then
-            echo "ERROR: neither MYSQL_VERSION nor VERSION found in source root" >&2
-            exit 1
-          fi
-          sed -i \
-            -e "s/^MYSQL_VERSION_MAJOR=.*/MYSQL_VERSION_MAJOR=${MAJOR}/" \
-            -e "s/^MYSQL_VERSION_MINOR=.*/MYSQL_VERSION_MINOR=${MINOR}/" \
-            -e "s/^MYSQL_VERSION_PATCH=.*/MYSQL_VERSION_PATCH=${PATCH}/" \
-            -e "s/^MYSQL_VERSION_EXTRA=.*/MYSQL_VERSION_EXTRA=${EXTRA}/" \
-            "$VERSION_FILE"
-          echo "--- ${VERSION_FILE} after injection ---"
-          cat "$VERSION_FILE"
-
-          # ---- Build & install ----
-          # 注意用 bash 跑：build.sh 用了 set -o pipefail，某些系统 /bin/sh 不支持。
-          # WITH_SSL 指向上面编好的静态 OpenSSL，build.sh 会据此追加 -DWITH_SSL。
-          export WITH_SSL=/opt/openssl-static
+          test -f VERSION
+          echo "--- VERSION (未改动) ---"; cat VERSION
           bash build.sh -t release -d /opt/alisql
           make install
-
-          # ---- Verify static SSL: mysqld must NOT depend on external OpenSSL ----
-          echo "--- ldd /opt/alisql/bin/mysqld ---"
-          ldd /opt/alisql/bin/mysqld || true
-          if ldd /opt/alisql/bin/mysqld | grep -Eiq 'libssl|libcrypto'; then
-            echo "ERROR: mysqld still dynamically links OpenSSL — static SSL failed" >&2
-            exit 1
-          fi
-          echo "OK: mysqld carries no external OpenSSL dependency"
+          echo "--- mysqld 版本 ---"; /opt/alisql/bin/mysqld --version
 
           # ---- Package ----
           cd /opt
-          VER="${MAJOR}.${MINOR}.${PATCH}-${EXTRA}"
           GLIBC="glibc$(ldd --version | awk 'NR==1{print $NF}')"
           ARCH="$(uname -m)"
           PKG="alisql-${VER}-linux-${GLIBC}-${ARCH}.tar.xz"
@@ -203,5 +137,5 @@ jobs:
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
-            --notes "Auto-built AliSQL ${VERSION} (oraclelinux:7, glibc 2.17, static OpenSSL 1.1.1w — no external libssl dependency). x86_64 and aarch64 binaries attached." \
+            --notes "Auto-built AliSQL ${VERSION} (debian:11, glibc 2.31, system OpenSSL 1.1.1 — 方案三 recipe). x86_64 and aarch64 binaries attached." \
             artifacts/*.tar.xz
