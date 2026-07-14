@@ -231,6 +231,12 @@ cmake_args=(
     -DMYSQL_SERVER_SUFFIX="$server_suffix"
 )
 
+# Optional custom SSL library (e.g. a statically-linked OpenSSL) via WITH_SSL env.
+# When unset, MySQL keeps its previous default (system OpenSSL).
+if [ -n "${WITH_SSL:-}" ]; then
+    cmake_args+=( -DWITH_SSL="${WITH_SSL}" )
+fi
+
 # Run CMake
 cmake . "${cmake_args[@]}"
 

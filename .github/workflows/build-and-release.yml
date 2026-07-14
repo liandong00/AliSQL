@@ -58,7 +58,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Build inside oraclelinux:7
+      - name: Build inside oraclelinux:7 (glibc 2.17 + static OpenSSL 1.0.2u)
         env:
           MAJOR:      ${{ needs.parse.outputs.major }}
           MINOR:      ${{ needs.parse.outputs.minor }}
@@ -87,9 +87,9 @@ jobs:
 
           yum clean all
           yum makecache
-          yum install -y git wget \
+          yum install -y git wget perl \
             devtoolset-10-gcc devtoolset-10-gcc-c++ devtoolset-10-binutils \
-            openssl openssl-devel ncurses-devel libaio-devel perl-IPC-Cmd bison
+            ncurses-devel libaio-devel perl-IPC-Cmd bison
 
           # ---- CMake ----
           cd /opt
@@ -97,6 +97,26 @@ jobs:
           tar -xzf "cmake-3.28.6-linux-${CMAKE_ARCH}.tar.gz"
           export PATH="/opt/cmake-3.28.6-linux-${CMAKE_ARCH}/bin:$PATH"
           cmake --version
+
+          # ---- Toolchain (gcc-10) ----
+          source scl_source enable devtoolset-10 || true
+          gcc --version
+
+          # ---- Static OpenSSL 1.0.2u ----
+          # Build a statically-linked OpenSSL so the resulting mysqld carries no
+          # external libssl.so.10 / libcrypto.so.10 dependency and can run on any
+          # glibc>=2.17 base (e.g. the debian:11-slim runtime image).
+          cd /opt
+          wget -q -O openssl-src.tar.gz \
+            "https://github.com/openssl/openssl/archive/refs/tags/OpenSSL_1_0_2u.tar.gz"
+          tar -xzf openssl-src.tar.gz
+          cd openssl-OpenSSL_1_0_2u
+          ./config --prefix=/opt/openssl-static no-shared no-zlib -fPIC
+          # OpenSSL 1.0.2 build is not reliably parallel-safe; build serially.
+          make
+          make install_sw
+          test -f /opt/openssl-static/lib/libssl.a
+          test -f /opt/openssl-static/lib/libcrypto.a
 
           # ---- Inject version from tag ----
           # 8.0 branch uses MYSQL_VERSION; 5.7 branch uses VERSION; same internal format.
@@ -119,9 +139,20 @@ jobs:
           cat "$VERSION_FILE"
 
           # ---- Build & install ----
-          source scl_source enable devtoolset-10 || true
-          sh build.sh -t release -d /opt/alisql
+          # 注意用 bash 跑：build.sh 用了 set -o pipefail，某些系统 /bin/sh 不支持。
+          # WITH_SSL 指向上面编好的静态 OpenSSL，build.sh 会据此追加 -DWITH_SSL。
+          export WITH_SSL=/opt/openssl-static
+          bash build.sh -t release -d /opt/alisql
           make install
+
+          # ---- Verify static SSL: mysqld must NOT depend on external OpenSSL ----
+          echo "--- ldd /opt/alisql/bin/mysqld ---"
+          ldd /opt/alisql/bin/mysqld || true
+          if ldd /opt/alisql/bin/mysqld | grep -Eiq 'libssl|libcrypto'; then
+            echo "ERROR: mysqld still dynamically links OpenSSL — static SSL failed" >&2
+            exit 1
+          fi
+          echo "OK: mysqld carries no external OpenSSL dependency"
 
           # ---- Package ----
           cd /opt
@@ -171,5 +202,5 @@ jobs:
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
-            --notes "Auto-built AliSQL ${VERSION} (oraclelinux:7, glibc 2.17). x86_64 and aarch64 binaries attached." \
+            --notes "Auto-built AliSQL ${VERSION} (oraclelinux:7, glibc 2.17, static OpenSSL 1.0.2u — no external libssl dependency). x86_64 and aarch64 binaries attached." \
             artifacts/*.tar.xz
