@@ -58,7 +58,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Build inside oraclelinux:7
+      - name: Build inside debian:11 (bullseye, glibc2.31 + OpenSSL 1.1)
         env:
           MAJOR:      ${{ needs.parse.outputs.major }}
           MINOR:      ${{ needs.parse.outputs.minor }}
@@ -72,24 +72,16 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/AliSQL" \
             -v "${GITHUB_WORKSPACE}/out:/out" \
             -e MAJOR -e MINOR -e PATCH -e EXTRA -e CMAKE_ARCH \
-            oraclelinux:7 \
+            -e DEBIAN_FRONTEND=noninteractive \
+            debian:11 \
             bash -ex <<'INNER'
 
-          # ---- Toolchain repo (devtoolset-10) ----
-          cat >/etc/yum.repos.d/ol7-scl.repo <<'REPO'
-          [ol7_software_collections]
-          name=Oracle Linux 7 Software Collections ($basearch)
-          baseurl=https://yum.oracle.com/repo/OracleLinux/OL7/SoftwareCollections/$basearch/
-          gpgcheck=1
-          enabled=1
-          gpgkey=https://yum.oracle.com/RPM-GPG-KEY-oracle-ol7
-          REPO
-
-          yum clean all
-          yum makecache
-          yum install -y git wget \
-            devtoolset-10-gcc devtoolset-10-gcc-c++ devtoolset-10-binutils \
-            openssl openssl-devel ncurses-devel libaio-devel perl-IPC-Cmd bison
+          # ---- Toolchain (bullseye 自带 gcc-10，等价旧 devtoolset-10；系统 OpenSSL 1.1 → libssl.so.1.1) ----
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git wget xz-utils \
+            build-essential bison pkg-config perl \
+            libssl-dev libncurses-dev libaio-dev zlib1g-dev
 
           # ---- CMake ----
           cd /opt
@@ -119,8 +111,8 @@ jobs:
           cat "$VERSION_FILE"
 
           # ---- Build & install ----
-          source scl_source enable devtoolset-10 || true
-          sh build.sh -t release -d /opt/alisql
+          # 注意用 bash 跑：build.sh 用了 set -o pipefail，debian 的 /bin/sh 是 dash 不支持
+          bash build.sh -t release -d /opt/alisql
           make install
 
           # ---- Package ----
@@ -171,5 +163,5 @@ jobs:
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
-            --notes "Auto-built AliSQL ${VERSION} (oraclelinux:7, glibc 2.17). x86_64 and aarch64 binaries attached." \
+            --notes "Auto-built AliSQL ${VERSION} (debian:11 bullseye, glibc 2.31, OpenSSL 1.1). x86_64 and aarch64 binaries attached." \
             artifacts/*.tar.xz
